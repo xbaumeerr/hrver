@@ -1,3 +1,5 @@
+import traceback
+
 import numpy as np
 import pandas as pd
 
@@ -6,7 +8,9 @@ from ecgdetectors import Detectors
 from scipy.interpolate import CubicSpline
 from statsmodels.tsa.stattools import acf as autocorrelationFunction
 
-from constants import REFERENCE_MEAN_MS, REFERENCE_STD_MS, INTERPOLATION_DELTA_TIME_MS, FeatureName, DetectorNames, DetectorName
+from hrver.api import PhysioRecord
+from hrver.constants import REFERENCE_MEAN_MS, REFERENCE_STD_MS, INTERPOLATION_DELTA_TIME_MS, CHUNKS_LENGTH_S, \
+    FeatureName, DetectorNames, DetectorName, FeatureNames
 
 
 def shouldSmooth(rr_ms: np.ndarray, reference_mean_ms: float = REFERENCE_MEAN_MS, reference_std_ms: float = REFERENCE_STD_MS) -> bool:
@@ -53,8 +57,11 @@ def smoothAnomalies(rr_ms: np.ndarray, reference_mean_ms: float = REFERENCE_MEAN
     return rr_ms
 
 
-def getRRChunks(rr_ms: np.ndarray, chunks_max_time_s: float = 90.0) -> np.ndarray:
+def getRRChunks(rr_ms: np.ndarray, chunks_max_time_s: float = 90.0) -> list[np.ndarray]:
     """Splits array of RR intervals into chunks of time about maximum time. Returns list of arrays."""
+    if rr_ms.sum() * 1e-3 <= chunks_max_time_s:
+        return [rr_ms, ]
+
     chunks_max_time_ms = chunks_max_time_s * 1e3
     chunk_time = 0
     chunks = []
@@ -114,7 +121,7 @@ def calculateHistogramStatistics(rr_ms: np.ndarray) -> dict[FeatureName, float]:
     Returns
     -------
     dict
-        Dictionary with results. Contains keys FeatureName.Mode, FeatureName.Amo50, FeatureName.MxDMn, FeatureName.MxRMn, FeatureName.SI
+        Dictionary with results. Contains keys FeatureNames.MODE, FeatureNames.AMO50, FeatureNames.MXDMN, FeatureNames.MXRMN, FeatureNames.SI
     """
     rr_min_ms = rr_ms.min()
     rr_max_ms = rr_ms.max()
@@ -137,7 +144,7 @@ def calculateHistogramStatistics(rr_ms: np.ndarray) -> dict[FeatureName, float]:
     mxrmn = rr_max_ms / rr_min_ms
     si = amo50_p / (2.0 * mode_s * mxdmn_ms)
 
-    return {FeatureName.Mode: mode_s, FeatureName.Amo50: amo50_p, FeatureName.MxDMn: mxdmn_ms, FeatureName.MxRMn: mxrmn, FeatureName.SI: si}
+    return {FeatureNames.MODE: mode_s, FeatureNames.AMO50: amo50_p, FeatureNames.MXDMN: mxdmn_ms, FeatureNames.MXRMN: mxrmn, FeatureNames.SI: si}
 
 
 def interpolate(rr_ms: np.ndarray, delta_time_ms: float = INTERPOLATION_DELTA_TIME_MS) -> tuple[np.ndarray, np.ndarray]:
@@ -188,8 +195,8 @@ def calculateACFStatistics(rr_ms: np.ndarray, rr_ms_interpolated: np.ndarray, in
     Returns
     -------
     dict
-        dictionary with keys FeatureName.CC1 - correlation coefficient after the first shift of autocorrelation function
-        and FeatureName.CC0 - time to the first zero value of autocorrelation function
+        dictionary with keys FeatureNames.CC1 - correlation coefficient after the first shift of autocorrelation function
+        and FeatureNames.CC0 - time to the first zero value of autocorrelation function
     """
     max_shift = int(rr_ms.sum() // interpolation_delta_time_ms)
     acf_data = autocorrelationFunction(rr_ms_interpolated, nlags=max_shift)
@@ -202,7 +209,7 @@ def calculateACFStatistics(rr_ms: np.ndarray, rr_ms_interpolated: np.ndarray, in
     first_zero_value_shift -= 1
     first_zero_value_shift = max(0, first_zero_value_shift)
     cc0 = first_zero_value_shift * interpolation_delta_time_ms * 1e-3
-    return {FeatureName.CC1: cc1, FeatureName.CC0: cc0}
+    return {FeatureNames.CC1: cc1, FeatureNames.CC0: cc0}
 
 
 def getSpectralRange(fft_freqs: np.ndarray, fmin: float, fmax: float) -> np.ndarray:
@@ -226,8 +233,8 @@ def calculateSpectralStatistics(rr_ms_interpolated: np.ndarray, interpolation_de
     Returns
     -------
     dict
-        dictionary with keys FeatureName.LFmax, FeatureName.HFmax - maximum values of spectral powers of LF and HF ranges in ms^2
-        and FeatureName.LFHF - value of LF/HF - ratio of LF/HF summary powers
+        dictionary with keys FeatureNames.LFMAX, FeatureNames.HFMAX - maximum values of spectral powers of LF and HF ranges in ms^2
+        and FeatureNames.LFHF - value of LF/HF - ratio of LF/HF summary powers
     """
     LF_MIN = 0.04
     LF_MAX = 0.15
@@ -255,7 +262,7 @@ def calculateSpectralStatistics(rr_ms_interpolated: np.ndarray, interpolation_de
 
 
 
-    return {FeatureName.LFmax: lf_max_ms2, FeatureName.HFmax: hf_max_ms2, FeatureName.LFHF: lf_hf}
+    return {FeatureNames.LFMAX: lf_max_ms2, FeatureNames.HFMAX: hf_max_ms2, FeatureNames.LFHF: lf_hf}
 
 
 def raiseOnInfinity(features: dict):
@@ -281,42 +288,111 @@ def detectRR(raw_ecg: np.ndarray, sampling_rate: float, detector_name: DetectorN
     rr_ms = (np.diff(r_indexes) / sampling_rate) * 1e3
     return rr_ms
 
+def _getPreparedChunks(
+        rr_ms: np.ndarray,
+        use_chunks: bool = True,
+        chunks_length_s: float = CHUNKS_LENGTH_S,
+        use_smoothing: bool = False,
+        smooth_reference_mean_ms: float = REFERENCE_MEAN_MS,
+        smooth_reference_std_ms: float = REFERENCE_STD_MS,
+        smooth_iterations: int = 10,
+        smooth_window_size: int = 0
+    ) -> list[np.ndarray]:
+    if use_smoothing and shouldSmooth(rr_ms, smooth_reference_mean_ms, smooth_reference_std_ms):
+        rr_ms = smoothAnomalies(rr_ms, smooth_reference_mean_ms, smooth_reference_std_ms, smooth_iterations, smooth_window_size)
+    
+    chunks = getRRChunks(rr_ms, chunks_length_s) if use_chunks else [rr_ms, ]
+    return chunks
 
-def getAllFeatures(raw_ecg: np.ndarray, sampling_rate: float, interpolation_delta_time_ms: float = INTERPOLATION_DELTA_TIME_MS, detector_name: DetectorName = DetectorNames.DETECTOR_HAMILTON) -> pd.DataFrame:
+
+def getRawEcgFeatures(
+        raw_ecg: np.ndarray, 
+        sampling_rate: float,
+        channel_index: int = 0,
+        interpolation_delta_time_ms: float = INTERPOLATION_DELTA_TIME_MS, 
+        detector_name: DetectorName = DetectorNames.DETECTOR_HAMILTON,
+        use_chunks: bool = True,
+        chunks_length_s: float = CHUNKS_LENGTH_S,
+        use_smoothing: bool = False,
+        smooth_reference_mean_ms: float = REFERENCE_MEAN_MS,
+        smooth_reference_std_ms: float = REFERENCE_STD_MS,
+        smooth_iterations: int = 10,
+        smooth_window_size: int = 0
+    ) -> pd.DataFrame:
     """Calculates features of 90 seconds chunks of raw ECG data"""
     ecg_length = len(raw_ecg)
     assert ecg_length > 0, "Got empty raw ECG data"
+    if raw_ecg.ndim > 1:
+        raw_ecg = raw_ecg[channel_index, :]
     
-    ecg_time_length = ecg_length
     rr_ms = detectRR(raw_ecg, sampling_rate, detector_name)
-    getRRChunks(rr_ms)
-    resulting_data = defaultdict(list)
-    mean_hr = meanHR(rr_ms)
-    raiseOnInfinity({FeatureName.HR: mean_hr})
-    rmssd = RMSSD(rr_ms)
-    raiseOnInfinity({FeatureName.RMSSD: rmssd})
-    pnn50 = pNN50(rr_ms)
-    raiseOnInfinity({FeatureName.pNN50: pnn50})
-    histogram_statistics = calculateHistogramStatistics(rr_ms)
-    raiseOnInfinity(histogram_statistics)
-    rr_t_ms, rr_ms_interpolated = interpolate(rr_ms, interpolation_delta_time_ms)
-    acf_statistics = calculateACFStatistics(rr_ms, rr_ms_interpolated, interpolation_delta_time_ms)
-    raiseOnInfinity(acf_statistics)
-    spectral_statistics = calculateSpectralStatistics(rr_ms_interpolated, interpolation_delta_time_ms)
-    raiseOnInfinity(spectral_statistics)
     
-    resulting_data[FeatureName.HR].append(mean_hr)
-    resulting_data[FeatureName.RMSSD].append(rmssd)
-    resulting_data[FeatureName.pNN50].append(pnn50)
-    resulting_data[FeatureName.Mode].append(histogram_statistics[FeatureName.Mode])
-    resulting_data[FeatureName.Amo50].append(histogram_statistics[FeatureName.Amo50])
-    resulting_data[FeatureName.MxRMn].append(histogram_statistics[FeatureName.MxRMn])
-    resulting_data[FeatureName.MxDMn].append(histogram_statistics[FeatureName.MxDMn])
-    resulting_data[FeatureName.SI].append(histogram_statistics[FeatureName.SI])
-    resulting_data[FeatureName.CC1].append(acf_statistics[FeatureName.CC1])
-    resulting_data[FeatureName.CC0].append(acf_statistics[FeatureName.CC0])
-    resulting_data[FeatureName.LFmax].append(spectral_statistics[FeatureName.LFmax])
-    resulting_data[FeatureName.HFmax].append(spectral_statistics[FeatureName.HFmax])
-    resulting_data[FeatureName.LFHF].append(spectral_statistics[FeatureName.LFHF])
+    chunks = _getPreparedChunks(
+        rr_ms, 
+        use_chunks, chunks_length_s, 
+        use_smoothing, smooth_reference_mean_ms, smooth_reference_std_ms, smooth_iterations, smooth_window_size
+    )
+    return extractFeatures(chunks, interpolation_delta_time_ms)
+
+
+def getPhysioRecordFeatures(
+        record: PhysioRecord,
+        channel_index: int = 0,
+        interpolation_delta_time_ms: float = INTERPOLATION_DELTA_TIME_MS, 
+        detector_name: DetectorName = DetectorNames.DETECTOR_HAMILTON,
+        use_chunks: bool = True,
+        chunks_length_s: float = CHUNKS_LENGTH_S,
+        use_smoothing: bool = False,
+        smooth_reference_mean_ms: float = REFERENCE_MEAN_MS,
+        smooth_reference_std_ms: float = REFERENCE_STD_MS,
+        smooth_iterations: int = 10,
+        smooth_window_size: int = 0
+    ) -> pd.DataFrame:
+    _, _, rr_ms = record.getRData(channel_index=channel_index, detector_name=detector_name)
+    chunks = _getPreparedChunks(
+        rr_ms, 
+        use_chunks, chunks_length_s, 
+        use_smoothing, smooth_reference_mean_ms, smooth_reference_std_ms, smooth_iterations, smooth_window_size
+    )
+    return extractFeatures(chunks, interpolation_delta_time_ms)
+
+
+def extractFeatures(rr_ms_chunks: list, interpolation_delta_time_ms: float = INTERPOLATION_DELTA_TIME_MS) -> pd.DataFrame:
+    resulting_data = defaultdict(list)
+
+    for rr_chunk_ms in rr_ms_chunks:
+        try:
+            mean_hr = meanHR(rr_chunk_ms)
+            raiseOnInfinity({FeatureNames.HR: mean_hr})
+            rmssd = RMSSD(rr_chunk_ms)
+            raiseOnInfinity({FeatureNames.RMSSD: rmssd})
+            pnn50 = pNN50(rr_chunk_ms)
+            raiseOnInfinity({FeatureNames.PNN50: pnn50})
+            histogram_statistics = calculateHistogramStatistics(rr_chunk_ms)
+            raiseOnInfinity(histogram_statistics)
+            rr_t_ms, rr_ms_interpolated = interpolate(rr_chunk_ms, interpolation_delta_time_ms)
+            acf_statistics = calculateACFStatistics(rr_chunk_ms, rr_ms_interpolated, interpolation_delta_time_ms)
+            raiseOnInfinity(acf_statistics)
+            spectral_statistics = calculateSpectralStatistics(rr_ms_interpolated, interpolation_delta_time_ms)
+            raiseOnInfinity(spectral_statistics)
+        except Exception as e:
+            print(f"Got error extracting features. Skipping this chunk.")
+            traceback.print_exc()
+            continue
+    
+        resulting_data[FeatureNames.HR].append(mean_hr)
+        resulting_data[FeatureNames.RMSSD].append(rmssd)
+        resulting_data[FeatureNames.PNN50].append(pnn50)
+        resulting_data[FeatureNames.MODE].append(histogram_statistics[FeatureNames.MODE])
+        resulting_data[FeatureNames.AMO50].append(histogram_statistics[FeatureNames.AMO50])
+        resulting_data[FeatureNames.MXRMN].append(histogram_statistics[FeatureNames.MXRMN])
+        resulting_data[FeatureNames.MXDMN].append(histogram_statistics[FeatureNames.MXDMN])
+        resulting_data[FeatureNames.SI].append(histogram_statistics[FeatureNames.SI])
+        resulting_data[FeatureNames.CC1].append(acf_statistics[FeatureNames.CC1])
+        resulting_data[FeatureNames.CC0].append(acf_statistics[FeatureNames.CC0])
+        resulting_data[FeatureNames.LFMAX].append(spectral_statistics[FeatureNames.LFMAX])
+        resulting_data[FeatureNames.HFMAX].append(spectral_statistics[FeatureNames.HFMAX])
+        resulting_data[FeatureNames.LFHF].append(spectral_statistics[FeatureNames.LFHF])
+    
     data_frame = pd.DataFrame(data=resulting_data)
     return data_frame

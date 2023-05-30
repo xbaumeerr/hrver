@@ -1,12 +1,14 @@
 import os
 import pickle
 import typing
+import pathlib
 
 import numpy as np
 import wfdb
+import wfdb.processing
 
 from ecgdetectors import Detectors
-from constants import DiseaseType, DetectorNames, DetectorName
+from hrver.constants import DiseaseType, DetectorNames, DetectorName
 
 
 class PhysioRecord:
@@ -75,7 +77,7 @@ class PhysioBase:
         if index in self.__records_cache:
             return self.__records_cache[index]
         else:
-            record = PhysioRecord(self, self.__records_list[index])
+            record = PhysioRecord.createFromDatabase(self, self.__records_list[index])
             self.__records_cache[index] = record
             return record
 
@@ -138,37 +140,70 @@ class PhysioRecord:
 
     DEFAULT_CACHE_FOLDER = 'cache'
 
-    def __init__(self, database: PhysioBase, record_path: str, cache_folder: str = DEFAULT_CACHE_FOLDER):
+    def __init__(self, cache_folder: str = DEFAULT_CACHE_FOLDER):
         self.cache_folder = cache_folder
-        
-        self.__database = database
-        self.__path = record_path
 
-        if '/' in record_path:
-            folder, self.__name = record_path.split('/')
-            self.__folder = f"{self.__database.label}/{folder}"
-        else:
-            self.__name, self.__folder = record_path, self.__database.label
-        
-        self.__header = wfdb.rdheader(self.__name, pn_dir=self.__folder)
-        self.__sampling_rate = self.__header.fs
-
-        self.__detectors = Detectors(self.__sampling_rate)
-
-        self.__disease_type = self.__database.getDiseaseType(self)
+        self.__database = None
+        self.__path = None
+        self.__sampling_rate = None
+        self.__disease_type = None
+        self.__header = None
+        self.__detectors = None
+        self.__annotation = None
 
         self.__signal = None
         self.__channel_index = None
         self.__r_indexes = None
         self.__rr_ms = None
 
+    @classmethod
+    def createFromDatabase(cls, database: PhysioBase, record_path: str, cache_folder: str = DEFAULT_CACHE_FOLDER) -> typing.Self:
+        record = PhysioRecord(cache_folder)
+        record.database = database
+        record.path = record_path
+        record.disease_type = database.getDiseaseType(record)
+        return record
+
+    @classmethod
+    def createFromPath(cls, record_path: str, disease_type: DiseaseType, annotation: str = None, cache_folder: str = DEFAULT_CACHE_FOLDER) -> typing.Self:
+        record = PhysioRecord(cache_folder)
+        record.path = record_path
+        record.disease_type = disease_type
+        record.annotation = annotation
+        return record
+
     @property
     def database(self) -> PhysioBase:
         return self.__database
 
+    @database.setter
+    def database(self, database: PhysioBase) -> None:
+        self.__database = database
+        self.__annotation = database.annotation
+
     @property
     def path(self) -> str:
         return self.__path
+
+    @path.setter
+    def path(self, record_path: str):
+        self.__path = record_path
+
+        if self.__database:
+            if '/' in record_path:
+                folder, self.__name = record_path.split('/')
+                self.__folder = f"{self.__database.label}/{folder}"
+            else:
+                self.__name, self.__folder = record_path, self.__database.label
+        else:
+            path = pathlib.Path(record_path)
+            self.__name = path.stem
+            self.__folder = path.parent
+
+        self.__header = wfdb.rdheader(self.__name, pn_dir=self.__folder)
+        self.__sampling_rate = self.__header.fs
+
+        self.__detectors = Detectors(self.__sampling_rate)
 
     @property
     def sampling_rate(self) -> float:
@@ -177,6 +212,18 @@ class PhysioRecord:
     @property
     def disease_type(self) -> DiseaseType:
         return self.__disease_type
+    
+    @disease_type.setter
+    def disease_type(self, disease_type: DiseaseType) -> None:
+        self.__disease_type = disease_type
+
+    @property
+    def annotation(self) -> str | None:
+        return self.__annotation
+
+    @annotation.setter
+    def annotation(self, annotation: str | None) -> None:
+        self.__annotation = annotation
 
     @property
     def name(self) -> str:
@@ -192,11 +239,11 @@ class PhysioRecord:
 
     def getAnnotation(self) -> wfdb.Annotation:
         """Get annotation of the record"""
-        return wfdb.rdann(self.__name, self.__database.annotation, pn_dir=self.__folder)
+        return wfdb.rdann(self.__name, self.__annotation, pn_dir=self.__folder)
 
     def getRRFromAnnotations(self) -> np.ndarray:
         """Get record`s RR-intervals indexes from database annotations file. Removes the first interval as it is an interval from not existing R peak to existing one."""
-        return wfdb.processing.ann2rr(self.__name, self.__database.annotation, pn_dir=self.__folder)[1:]
+        return wfdb.processing.ann2rr(self.__name, self.__annotation, pn_dir=self.__folder)[1:]
 
     def __updateRRData(self, channel_index: int = 0, detector_name: DetectorName = DetectorNames.DETECTOR_HAMILTON, force_use_detector: bool = False, reupdate_data: bool = False):
         """
@@ -216,7 +263,7 @@ class PhysioRecord:
         sample, info = wfdb.rdsamp(self.__name, pn_dir=self.__folder)
         self.__signal = sample[:, channel_index]
 
-        if self.__database.annotation and not force_use_detector:
+        if self.__annotation and not force_use_detector:
             annotation = self.getAnnotation()
             self.__r_indexes = annotation.sample
             self.__rr_ms = (self.getRRFromAnnotations() / self.__sampling_rate) * 1e3
@@ -250,8 +297,6 @@ class PhysioRecord:
         self.__r_indexes = None
         self.__rr_ms = None
         self.__signal = None
-        if self.__doesCacheFileExist():
-            os.remove(self.__getCachePath())
 
     def __getCachePath(self) -> str:
         """Returns path to cache file"""

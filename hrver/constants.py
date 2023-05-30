@@ -2,7 +2,9 @@ from typing import TypeAlias
 
 REFERENCE_MEAN_MS = 800.0
 REFERENCE_STD_MS = 80.0
+
 INTERPOLATION_DELTA_TIME_MS = 250.0
+CHUNKS_LENGTH_S = 90.0
 
 class AllFields(type):
     """Metaclass to create additional tuple ALL that contains all fields of a class"""
