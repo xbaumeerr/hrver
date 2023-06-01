@@ -165,7 +165,7 @@ class PhysioRecord:
         return record
 
     @classmethod
-    def createFromPath(cls, record_path: str, disease_type: DiseaseType, annotation: str = None, cache_folder: str = DEFAULT_CACHE_FOLDER) -> typing.Self:
+    def createFromPath(cls, record_path: str, disease_type: DiseaseType | None = None, annotation: str = None, cache_folder: str = DEFAULT_CACHE_FOLDER) -> typing.Self:
         record = PhysioRecord(cache_folder)
         record.path = record_path
         record.disease_type = disease_type
