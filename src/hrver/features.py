@@ -296,7 +296,7 @@ def _getPreparedChunks(
         smooth_reference_mean_ms: float = REFERENCE_MEAN_MS,
         smooth_reference_std_ms: float = REFERENCE_STD_MS,
         smooth_iterations: int = 10,
-        smooth_window_size: int = 0
+        smooth_window_size: int = 3
     ) -> list[np.ndarray]:
     if use_smoothing and shouldSmooth(rr_ms, smooth_reference_mean_ms, smooth_reference_std_ms):
         rr_ms = smoothAnomalies(rr_ms, smooth_reference_mean_ms, smooth_reference_std_ms, smooth_iterations, smooth_window_size)
@@ -317,7 +317,7 @@ def getRawEcgFeatures(
         smooth_reference_mean_ms: float = REFERENCE_MEAN_MS,
         smooth_reference_std_ms: float = REFERENCE_STD_MS,
         smooth_iterations: int = 10,
-        smooth_window_size: int = 0
+        smooth_window_size: int = 3
     ) -> pd.DataFrame:
     """Calculates features of 90 seconds chunks of raw ECG data"""
     ecg_length = len(raw_ecg)
