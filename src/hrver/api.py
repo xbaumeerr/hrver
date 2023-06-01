@@ -197,8 +197,8 @@ class PhysioRecord:
                 self.__name, self.__folder = record_path, self.__database.label
         else:
             path = pathlib.Path(record_path)
-            self.__name = path.stem
-            self.__folder = path.parent
+            self.__name = record_path if not path.with_suffix() else record_path.split('.')[0]
+            self.__folder = None
 
         self.__header = wfdb.rdheader(self.__name, pn_dir=self.__folder)
         self.__sampling_rate = self.__header.fs
@@ -223,6 +223,9 @@ class PhysioRecord:
 
     @annotation.setter
     def annotation(self, annotation: str | None) -> None:
+        self.__annotation = annotation
+
+    def setAnnotation(self, annotation: str | None) -> None:
         self.__annotation = annotation
 
     @property

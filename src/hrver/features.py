@@ -324,7 +324,6 @@ def getRawEcgFeatures(
     assert ecg_length > 0, "Got empty raw ECG data"
     if raw_ecg.ndim > 1:
         raw_ecg = raw_ecg[channel_index, :]
-    
     rr_ms = detectRR(raw_ecg, sampling_rate, detector_name)
     
     chunks = _getPreparedChunks(
