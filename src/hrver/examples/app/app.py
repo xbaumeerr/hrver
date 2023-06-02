@@ -1,7 +1,7 @@
 import os
 import sys
+import time
 import pathlib
-from PyQt5 import QtGui
 
 import pandas as pd
 import numpy as np
@@ -60,7 +60,7 @@ class SamplingRateValidator(QIntValidator):
 
 
 class ProcessingThread(QThread):
-    process_ended = pyqtSignal(pd.DataFrame, DiseaseType, float, bool, str)
+    process_ended = pyqtSignal(pd.DataFrame, DiseaseType, float, bool, str, float)
     progress_stepped = pyqtSignal(int, str)
 
     def __init__(self, parameters: dict, pca, scaler, model, record: PhysioRecord = None, file_path: str = None):
@@ -88,6 +88,7 @@ class ProcessingThread(QThread):
 
     def run(self):
         proba = 0
+        start_time = time.time()
         try:
             if self.__record and self.__record.annotation:
                 self.__features = getPhysioRecordFeatures(self.__record, **self.__parameters)
@@ -118,7 +119,9 @@ class ProcessingThread(QThread):
             self.__error = e
             proba = 0
             self.__features = pd.DataFrame()
-        self.process_ended.emit(self.__features, self.__prediction, proba, self.__error is not None, str(self.__error))
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        self.process_ended.emit(self.__features, self.__prediction, proba, self.__error is not None, str(self.__error), elapsed_time)
 
 
 
@@ -172,20 +175,28 @@ class MainWindow(QWidget):
         file_path, _ = QFileDialog.getOpenFileName(self, 'Select ECG file', "", "All Files (*);; WFDB Files (*.dat);", options=options)
         if file_path:
             self.__file_selected_widgets.setDisabled(False)
-            self.file_path = file_path
-            self.__selected_file_line_edit.setText(self.file_path)
+            
+            if self.__file_path != file_path:
+                self.__record = None
+                self.__sampling_rate_line_edit.setText("0")
 
-            if os.path.splitext(self.file_path)[-1] == '.dat':
+            
+            self.__file_path = file_path
+            self.__selected_file_line_edit.setText(self.__file_path)
+
+            
+            if os.path.splitext(self.__file_path)[-1] == '.dat':
                 try:
-                    self.__record = PhysioRecord.createFromPath(self.file_path, None)
+                    self.__record = PhysioRecord.createFromPath(self.__file_path, None)
                 except Exception as e:
                     self.__record = None
-                    file_name = pathlib.Path(self.file_path).stem
+                    file_name = pathlib.Path(self.__file_path).stem
                     QMessageBox.information(self, "Could not read WFDB data", f"Got .dat file. Could not find header file {file_name}.hea or header syntax is wrong. Accepting {file_name}.dat file as raw ECG. Error: {e}")
                 
                 self.__record_annotation_line_edit.setDisabled(self.__record is None)
                 if self.__record is not None:
                     self.__sampling_rate_line_edit.setText(str(self.__record.sampling_rate))
+                    
 
 
     def __process(self):
@@ -216,13 +227,13 @@ class MainWindow(QWidget):
 
         self.__processing_progress_bar.setStyleSheet("QProgressBar::chunk { background-color: green; }")
         self.__processing_progress_bar.setTextVisible(False)
-        self.__processing_thread = ProcessingThread(parameters, self.__pca, self.__scaler, self.__model, record=self.__record, file_path=self.file_path)
+        self.__processing_thread = ProcessingThread(parameters, self.__pca, self.__scaler, self.__model, record=self.__record, file_path=self.__file_path)
         self.__processing_thread.start()
 
         self.__processing_thread.process_ended.connect(self.__onProcessEnded)
         self.__processing_thread.progress_stepped.connect(self.__onProgressStepped)
     
-    def __onProcessEnded(self, features: pd.DataFrame, prediction: DiseaseType, probability: float, with_error: bool, error: str):
+    def __onProcessEnded(self, features: pd.DataFrame, prediction: DiseaseType, probability: float, with_error: bool, error: str, elapsed_time: float):
         self.__process_depended_widgets.setDisabled(False)
         
         if with_error:
@@ -231,6 +242,8 @@ class MainWindow(QWidget):
             self.__processing_progress_bar.setValue(0)
             self.__processing_progress_bar.setStyleSheet("QProgressBar::chunk { background-color: red; }")
             return
+        self.__processing_progress_bar.setTextVisible(True)
+        self.__processing_progress_bar.setFormat(f"Elapsed time: {elapsed_time:.2f} s")
         result_message = f"Results: {prediction} ({probability * 100:.2f}% probability)"
         QMessageBox.information(self, "Results", result_message)
         self.__results_label.setText(result_message)
