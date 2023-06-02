@@ -2,6 +2,7 @@ files-patients-diagnoses.txt
 record-descriptions.txt
 .vscode/
 cache/
+tempCodeRunnerFile.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
